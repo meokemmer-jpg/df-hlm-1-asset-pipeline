@@ -243,3 +243,87 @@ def test_k16_mutex_blocks_concurrent_spawn(engine: ap.AssetPipeline) -> None:
         with pytest.raises(ap.MutexActiveError) as exc_info:
             engine.run()
     assert "K16-VETO" in str(exc_info.value)
+
+
+def test_lc3_circuit_breaker_opens_after_threshold_failures(
+    engine: ap.AssetPipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LC3 Circuit-Breaker: 3 consecutive Failures -> break loop + circuit_open audit-event.
+
+    Belegt LC3 Welle-D Pflicht-Test-Klasse (Phase D-2):
+    - failure_streak waechst pro Exception in generate_combo
+    - Bei threshold (config=3) erreicht: audit('circuit_open') + break
+    - error_count == threshold (NICHT alle 56 Combos versucht)
+    """
+    threshold = int(
+        engine.config["lose_coupling"]["LC3_circuit_breaker"][
+            "circuit_breaker_open_threshold"
+        ]
+    )
+    assert threshold == 3, "Test expects config-Default threshold=3"
+
+    # Force every generate_combo() to raise
+    def always_fail(*args, **kwargs):
+        raise RuntimeError("forced-failure-for-lc3-test")
+    monkeypatch.setattr(engine, "generate_combo", always_fail)
+
+    result = engine.run()
+
+    # Assert: Circuit-Breaker stopped iteration at threshold (not all 56 combos)
+    assert result["status"] == "completed_with_errors"
+    assert result["error_count"] == threshold, (
+        f"Expected circuit-break after {threshold} failures, got {result['error_count']}"
+    )
+    assert result["generated_combo_count"] == 0
+
+    # Assert: audit log has 'circuit_open' event
+    audit_log_path = Path(engine.config["operations"]["audit_log_path"])
+    audit_lines = audit_log_path.read_text(encoding="utf-8").strip().split("\n")
+    circuit_events = [
+        json.loads(line) for line in audit_lines if '"circuit_open"' in line
+    ]
+    assert len(circuit_events) >= 1, "circuit_open audit-event missing"
+    assert circuit_events[0]["failure_streak"] >= threshold
+
+
+def test_lc3_circuit_breaker_resets_on_success(
+    engine: ap.AssetPipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LC3 Circuit-Breaker: success resets failure_streak (no premature open).
+
+    Sequence: fail -> fail -> success -> fail -> fail -> success -> ... (no break)
+    Bestaetigt: failure_streak = 0 nach success (failure_streak nicht-monoton).
+    """
+    threshold = int(
+        engine.config["lose_coupling"]["LC3_circuit_breaker"][
+            "circuit_breaker_open_threshold"
+        ]
+    )
+
+    # Alternating fail-pattern: 2 fails (under threshold), then success, repeat
+    original = engine.generate_combo
+    call_counter = {"n": 0}
+
+    def alternating(*args, **kwargs):
+        call_counter["n"] += 1
+        # Every 3rd call succeeds (so failure_streak max = 2 < threshold=3)
+        if call_counter["n"] % 3 == 0:
+            return original(*args, **kwargs)
+        raise RuntimeError("forced-intermittent-failure")
+
+    monkeypatch.setattr(engine, "generate_combo", alternating)
+
+    result = engine.run()
+
+    # Circuit-Breaker did NOT open (since streak max = 2 < threshold=3)
+    audit_log_path = Path(engine.config["operations"]["audit_log_path"])
+    audit_lines = audit_log_path.read_text(encoding="utf-8").strip().split("\n")
+    circuit_events = [
+        line for line in audit_lines if '"circuit_open"' in line
+    ]
+    assert len(circuit_events) == 0, (
+        f"Circuit should NOT open with intermittent failures < threshold, "
+        f"got {len(circuit_events)} circuit_open events"
+    )
+    # Some combos succeeded (every 3rd of 56 = ~18)
+    assert result["generated_combo_count"] > 0
