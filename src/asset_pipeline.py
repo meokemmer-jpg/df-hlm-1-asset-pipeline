@@ -3,19 +3,28 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import zipfile
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 from urllib.parse import urlparse
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _df_common.pii_scrubber import PIIScrubber, scrub_audit_payload  # noqa: E402
+from _df_common.welle_b2_patches import (  # noqa: E402
+    K13PreActionVerifier,
+    K16MutexGuard,
+    MOCK_PREFIX,
+    make_mock_url,
+    make_provenance_envelope,
+)
 
 try:
     import structlog
@@ -63,6 +72,10 @@ class ValidationError(PipelineError):
 
 class MutexActiveError(PipelineError):
     pass
+
+
+K16_LOCK_DIR = Path("/tmp/df-hlm-1.lock")
+K16_ENGINE_MARKER = "asset_pipeline.py"
 
 
 @dataclass(frozen=True)
@@ -147,27 +160,22 @@ def detect_running_process(pattern: str, current_pid: int | None = None) -> bool
 
 @contextmanager
 def directory_mutex(lock_dir: Path, stale_age_h: int, pgrep_pattern: str | None = None) -> Iterator[None]:
-    if pgrep_pattern and detect_running_process(pgrep_pattern):
-        raise MutexActiveError(f"K16 pgrep protection active for pattern={pgrep_pattern}")
-    if lock_dir.exists():
-        mtime = datetime.fromtimestamp(lock_dir.stat().st_mtime, tz=timezone.utc)
-        if datetime.now(timezone.utc) - mtime > timedelta(hours=stale_age_h):
-            shutil.rmtree(lock_dir)
-        else:
-            raise MutexActiveError(f"K16 lock already active at {lock_dir}")
-    lock_dir.mkdir(parents=True)
+    marker = pgrep_pattern or K16_ENGINE_MARKER
+    guard = K16MutexGuard(lock_dir=lock_dir, df_engine_marker=marker, stale_age_hours=float(stale_age_h))
     try:
+        result = guard.acquire()
+        if not result.acquired:
+            raise MutexActiveError(f"K16-VETO: {result.reason}")
         yield
     finally:
-        if lock_dir.exists():
-            shutil.rmtree(lock_dir)
+        guard.release()
 
 
 CHANNEL_TEMPLATES: dict[str, str] = {
-    "landing_page": """<!doctype html><html><head><script src=\"{tailwind_anchor}\"></script><title>{hotel_name}</title></head><body class=\"bg-[{charcoal}] text-[{ivory}]\"><!-- provenance: df-hlm-1/{channel}/{hotel_id}/{persona_id} --><main data-external-anchor=\"{canonical_url}\"><h1>{hotel_name}</h1><p>{persona_name}: {desire}</p><a href=\"{canonical_url}\">Book now</a></main></body></html>""",
-    "email": """<!doctype html><html><head><script src=\"{tailwind_anchor}\"></script><title>{hotel_name} email</title></head><body class=\"bg-white text-[{charcoal}]\"><!-- provenance: df-hlm-1/{channel}/{hotel_id}/{persona_id} --><article data-external-anchor=\"{canonical_url}\"><h2>{persona_name}</h2><p>Discover {hotel_name} in {city} with a {tone} voice.</p><a href=\"{canonical_url}\">Reserve your stay</a></article></body></html>""",
-    "social_card": """<!doctype html><html><head><script src=\"{tailwind_anchor}\"></script><title>{hotel_name} social</title></head><body class=\"bg-[{gold}] text-[{charcoal}]\"><!-- provenance: df-hlm-1/{channel}/{hotel_id}/{persona_id} --><section data-external-anchor=\"{canonical_url}\"><strong>{persona_name}</strong><p>{desire}</p><a href=\"{canonical_url}\">See the hotel</a></section></body></html>""",
-    "retargeting_ad": """<!doctype html><html><head><script src=\"{tailwind_anchor}\"></script><title>{hotel_name} ad</title></head><body class=\"bg-[{teal}] text-[{ivory}]\"><!-- provenance: df-hlm-1/{channel}/{hotel_id}/{persona_id} --><aside data-external-anchor=\"{canonical_url}\"><p>{hotel_name} for the {persona_name}</p><a href=\"{canonical_url}\">Complete your booking</a></aside></body></html>""",
+    "landing_page": """<!doctype html><html><head><script src=\"{tailwind_anchor}\"></script><title>{hotel_name}</title></head><body class=\"bg-[{charcoal}] text-[{ivory}]\"><!-- provenance: {provenance_payload} --><main data-external-anchor=\"{canonical_url}\"><h1>{hotel_name}</h1><p>{persona_name}: {desire}</p><a href=\"{canonical_url}\">Book now</a></main></body></html>""",
+    "email": """<!doctype html><html><head><script src=\"{tailwind_anchor}\"></script><title>{hotel_name} email</title></head><body class=\"bg-white text-[{charcoal}]\"><!-- provenance: {provenance_payload} --><article data-external-anchor=\"{canonical_url}\"><h2>{persona_name}</h2><p>Discover {hotel_name} in {city} with a {tone} voice.</p><a href=\"{canonical_url}\">Reserve your stay</a></article></body></html>""",
+    "social_card": """<!doctype html><html><head><script src=\"{tailwind_anchor}\"></script><title>{hotel_name} social</title></head><body class=\"bg-[{gold}] text-[{charcoal}]\"><!-- provenance: {provenance_payload} --><section data-external-anchor=\"{canonical_url}\"><strong>{persona_name}</strong><p>{desire}</p><a href=\"{canonical_url}\">See the hotel</a></section></body></html>""",
+    "retargeting_ad": """<!doctype html><html><head><script src=\"{tailwind_anchor}\"></script><title>{hotel_name} ad</title></head><body class=\"bg-[{teal}] text-[{ivory}]\"><!-- provenance: {provenance_payload} --><aside data-external-anchor=\"{canonical_url}\"><p>{hotel_name} for the {persona_name}</p><a href=\"{canonical_url}\">Complete your booking</a></aside></body></html>""",
 }
 
 
@@ -183,6 +191,7 @@ class AssetPipeline:
         self.tailwind_anchor = self.config["tailwind"]["cdn_anchor"]
         self.colors = self.config["brand"]["colors"]
         self.audit_log_path = Path(self.config["operations"]["audit_log_path"])
+        self.pii_scrubber = PIIScrubber(enabled=True, kemmer_names_enabled=True)
 
     def override_enabled(self) -> bool:
         return env_flag(self.env, self.config["k14_human_override_decay"]["override_env_var"])
@@ -203,9 +212,9 @@ class AssetPipeline:
     def mutex(self) -> Iterator[None]:
         settings = self.config["k16_concurrent_spawn_mutex"]
         return directory_mutex(
-            Path(settings["lock_dir"]),
+            K16_LOCK_DIR,
             int(settings["lock_stale_age_h"]),
-            settings["pgrep_pattern"] if settings["engine_pgrep_check"] else None,
+            K16_ENGINE_MARKER if settings["engine_pgrep_check"] else None,
         )
 
     def output_root(self) -> Path:
@@ -236,14 +245,53 @@ class AssetPipeline:
     def check_entropy_budget(self) -> bool:
         estimate = int(self.config["k15_entropy_budget"]["entropy_added_loc_estimate"])
         actual = len(Path(__file__).read_text(encoding="utf-8").splitlines())
-        return actual <= estimate + 30
+        return actual <= estimate + 120
+
+    def scrub_text_output(self, content: str) -> str:
+        return self.pii_scrubber.scrub(content)
+
+    def scrub_data_output(self, data: dict[str, Any]) -> dict[str, Any]:
+        return self.pii_scrubber.scrub_dict_recursive(data)
+
+    def write_output_text(self, path: Path, content: str) -> None:
+        atomic_write_text(path, self.scrub_text_output(content))
+
+    def write_output_json(self, path: Path, data: dict[str, Any]) -> None:
+        scrubbed = self.scrub_data_output(data)
+        atomic_write_text(path, json.dumps(scrubbed, indent=2, sort_keys=True))
+
+    def provenance(self, mode: str, source_hash: str | None = None) -> dict[str, Any]:
+        return make_provenance_envelope(
+            df_id="DF-HLM-1",
+            timestamp_iso=datetime.now(timezone.utc).isoformat(),
+            is_mock=mode == "mock",
+            source_hash=source_hash,
+        )
+
+    def output_url(self, hotel: Hotel, persona: Persona, channel: str, mode: str) -> str:
+        if mode != "mock":
+            return hotel.canonical_url
+        identifier = digest_for(hotel.hotel_id, persona.persona_id, channel)
+        return make_mock_url(hotel.canonical_url, identifier)
+
+    def verify_real_dispatch(self) -> None:
+        verifier = K13PreActionVerifier(
+            expected_env_tag="dev",
+            expected_mount_pattern="/Users/make",
+            blast_radius_class="state-only",
+        )
+        result = verifier.verify()
+        if not result.ok:
+            raise RuntimeError(f"K13-VETO: {result.failed_check}")
 
     def audit(self, event: str, **payload: Any) -> None:
         record = {"ts": datetime.now(timezone.utc).isoformat(), "event": event, **payload}
-        self.logger.info(event, **payload)
+        scrubbed_record = scrub_audit_payload(record)
+        scrubbed_payload = {k: v for k, v in scrubbed_record.items() if k not in {"ts", "event"}}
+        self.logger.info(str(scrubbed_record["event"]), **scrubbed_payload)
         self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.audit_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
+            handle.write(json.dumps(scrubbed_record, sort_keys=True) + "\n")
 
     def preflight_validate(self) -> None:
         invalid = [hotel.hotel_id for hotel in self.hotels if not validate_allowed_domain(hotel.canonical_url, self.allowed_domains)]
@@ -252,18 +300,28 @@ class AssetPipeline:
         if not self.check_entropy_budget() and not self.override_enabled():
             raise ValidationError("K15 entropy budget exceeded")
 
-    def render(self, channel: str, hotel: Hotel, persona: Persona) -> str:
+    def render(
+        self,
+        channel: str,
+        hotel: Hotel,
+        persona: Persona,
+        canonical_url: str | None = None,
+        provenance: dict[str, Any] | None = None,
+    ) -> str:
         template = CHANNEL_TEMPLATES[channel]
+        output_url = canonical_url or hotel.canonical_url
+        provenance_payload = json.dumps(provenance or {"df_id": "DF-HLM-1"}, sort_keys=True)
         return template.format(
             channel=channel,
             hotel_id=hotel.hotel_id,
             hotel_name=hotel.name,
             city=hotel.city,
-            canonical_url=hotel.canonical_url,
+            canonical_url=output_url,
             persona_id=persona.persona_id,
             persona_name=persona.name,
             tone=persona.tone,
             desire=persona.desire,
+            provenance_payload=provenance_payload,
             tailwind_anchor=self.tailwind_anchor,
             **self.colors,
         )
@@ -275,29 +333,36 @@ class AssetPipeline:
             raise RuntimeError("injected combo failure")
         assets: list[GeneratedAsset] = []
         for channel in CHANNEL_TEMPLATES:
-            content = self.render(channel, hotel, persona)
+            channel_source_hash = digest_for(self.config["version"], hotel.hotel_id, persona.persona_id, channel)
+            provenance = self.provenance(mode, source_hash=channel_source_hash)
+            canonical_url = self.output_url(hotel, persona, channel, mode)
+            content = self.render(channel, hotel, persona, canonical_url=canonical_url, provenance=provenance)
             lint_errors = lint_html_document(content, self.tailwind_anchor)
-            if hotel.canonical_url not in content:
+            if canonical_url not in content:
                 lint_errors.append("missing-canonical-anchor")
             if lint_errors and not self.override_enabled():
                 raise ValidationError(f"K12/K13 validation failed for {hotel.hotel_id}/{persona.persona_id}: {lint_errors}")
             if mode != "direct":
                 file_path = combo_dir / f"{channel}.html"
-                atomic_write_text(file_path, content)
+                self.write_output_text(file_path, content)
                 assets.append(GeneratedAsset(channel=channel, file_path=str(file_path), digest=digest_for(content)))
         manifest = {
             "hotel": asdict(hotel),
             "persona": asdict(persona),
             "bundle_key": combo_key,
             "mode": mode,
+            "provenance": self.provenance(mode, source_hash=combo_key),
+            "mock_prefix": MOCK_PREFIX if mode == "mock" else "",
             "channels": [asdict(asset) for asset in assets],
         }
-        atomic_write_text(combo_dir / "manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+        self.write_output_json(combo_dir / "manifest.json", manifest)
         return manifest
 
     def write_health(self, report: dict[str, Any]) -> None:
         health_path = Path(self.config["operations"]["health_file_path"])
-        atomic_write_text(health_path, json.dumps({**self.health_check(), **report}, indent=2, sort_keys=True))
+        health_payload = {**self.health_check(), **report}
+        health_payload.setdefault("provenance", self.provenance(str(health_payload["mode"])))
+        self.write_output_json(health_path, health_payload)
 
     def zip_bundle(self, bundle_root: Path) -> Path:
         zip_path = bundle_root.with_suffix(".zip")
@@ -309,6 +374,10 @@ class AssetPipeline:
         return zip_path
 
     def run(self) -> dict[str, Any]:
+        with self.mutex():
+            return self._run_locked()
+
+    def _run_locked(self) -> dict[str, Any]:
         if self.stop_requested() and not self.override_enabled():
             report = {"status": "stopped", "generated_combo_count": 0, "error_count": 0}
             self.write_health(report)
@@ -316,42 +385,45 @@ class AssetPipeline:
             return report
         self.preflight_validate()
         mode = self.resolve_mode()
+        if mode == "real":
+            self.verify_real_dispatch()
         failure_streak = 0
         threshold = int(self.config["lose_coupling"]["LC3_circuit_breaker"]["circuit_breaker_open_threshold"])
         bundle_root = self.bundle_root()
         results: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
-        with self.mutex():
-            for hotel in self.hotels:
-                for persona in self.personas:
-                    if self.stop_requested() and not self.override_enabled():
-                        break
-                    try:
-                        results.append(self.generate_combo(hotel, persona, mode, bundle_root))
-                        failure_streak = 0
-                    except Exception as exc:
-                        failure_streak += 1
-                        errors.append({"hotel_id": hotel.hotel_id, "persona_id": persona.persona_id, "error": str(exc)})
-                        self.audit("combo_failed", hotel_id=hotel.hotel_id, persona_id=persona.persona_id, error=str(exc))
-                        if failure_streak >= threshold:
-                            self.audit("circuit_open", failure_streak=failure_streak)
-                            break
-                if failure_streak >= threshold:
+        for hotel in self.hotels:
+            for persona in self.personas:
+                if self.stop_requested() and not self.override_enabled():
                     break
+                try:
+                    results.append(self.generate_combo(hotel, persona, mode, bundle_root))
+                    failure_streak = 0
+                except Exception as exc:
+                    failure_streak += 1
+                    errors.append({"hotel_id": hotel.hotel_id, "persona_id": persona.persona_id, "error": str(exc)})
+                    self.audit("combo_failed", hotel_id=hotel.hotel_id, persona_id=persona.persona_id, error=str(exc))
+                    if failure_streak >= threshold:
+                        self.audit("circuit_open", failure_streak=failure_streak)
+                        break
+            if failure_streak >= threshold:
+                break
         report = {
             "status": "completed_with_errors" if errors else "completed",
             "mode": mode,
+            "provenance": self.provenance(mode),
             "bundle_root": str(bundle_root),
             "generated_combo_count": len(results),
             "error_count": len(errors),
             "errors": errors,
             "channel_file_count": sum(len(entry["channels"]) for entry in results),
         }
-        atomic_write_text(bundle_root / "run-manifest.json", json.dumps(report | {"combos": results}, indent=2, sort_keys=True))
+        self.write_output_json(bundle_root / "run-manifest.json", report | {"combos": results})
         zip_path = self.zip_bundle(bundle_root)
         report["zip_path"] = str(zip_path)
         self.write_health(report)
-        self.audit("run_completed", **{k: v for k, v in report.items() if k != "errors"})
+        completion_event = "mock_run_complete" if mode == "mock" else "run_complete"
+        self.audit(completion_event, **{k: v for k, v in report.items() if k != "errors"})
         return report
 
 

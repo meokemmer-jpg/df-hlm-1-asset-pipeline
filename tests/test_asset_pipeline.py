@@ -53,6 +53,11 @@ def pipeline(config_path: Path) -> ap.AssetPipeline:
 
 
 @pytest.fixture
+def engine(config_path: Path) -> ap.AssetPipeline:
+    return ap.AssetPipeline(config_path, env={})
+
+
+@pytest.fixture
 def completed_report(config_path: Path) -> tuple[ap.AssetPipeline, dict[str, object]]:
     pipeline = ap.AssetPipeline(config_path, env={})
     return pipeline, pipeline.run()
@@ -98,7 +103,7 @@ def test_k16_lock_blocks_second_runner(pipeline: ap.AssetPipeline) -> None:
 
 
 def test_k16_pgrep_detects_existing_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ap, "detect_running_process", lambda pattern, current_pid=None: True)
+    monkeypatch.setattr(ap.K16MutexGuard, "_pgrep_other_instance", lambda self: 12345)
     with pytest.raises(ap.MutexActiveError):
         with ap.directory_mutex(Path("/does/not/matter"), 1, "asset_pipeline.py"):
             pass
@@ -194,4 +199,47 @@ def test_audit_log_is_written(completed_report: tuple[ap.AssetPipeline, dict[str
     pipeline, _ = completed_report
     assert pipeline.audit_log_path.exists()
     lines = pipeline.audit_log_path.read_text(encoding="utf-8").strip().splitlines()
-    assert any("run_completed" in line for line in lines)
+    assert any("mock_run_complete" in line for line in lines)
+
+
+def test_pii_scrubbed_in_output_with_kemmer_name(workspace: Path) -> None:
+    """Output enthaelt keinen Kemmer-Familien-Namen."""
+    def mutate(config):
+        config["personas"][0]["name"] = "Martin"
+        config["personas"][0]["desire"] = "Imke wants a quiet stay"
+
+    config_path = make_config(workspace, mutate)
+    report = ap.AssetPipeline(config_path, env={}).run()
+    bundle_root = Path(str(report["bundle_root"]))
+    sample = next(bundle_root.rglob("landing_page.html")).read_text(encoding="utf-8")
+    assert "Martin" not in sample
+    assert "Imke" not in sample
+    assert "[PII-REDACTED]" in sample
+
+
+def test_k13_pre_action_verification_env_tag_block(config_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real-Mode mit falschem env_tag wird geblockt."""
+    monkeypatch.setenv("DF_ENV_TAG", "prod")
+    monkeypatch.setenv("DF_HLM_1_ENABLE_REAL_OUTPUT", "1")
+    with pytest.raises(RuntimeError) as exc_info:
+        ap.AssetPipeline(config_path, env={"DF_HLM_1_ENABLE_REAL_OUTPUT": "1"}).run()
+    assert "K13" in str(exc_info.value)
+
+
+def test_mock_provenance_explicit_in_output(engine: ap.AssetPipeline) -> None:
+    """Mock-Outputs haben 'mode': 'mock' in Provenance."""
+    result = engine.run()
+    bundle_root = Path(str(result["bundle_root"]))
+    sample = next(bundle_root.rglob("landing_page.html")).read_text(encoding="utf-8")
+    manifest = json.loads((bundle_root / "run-manifest.json").read_text(encoding="utf-8"))
+    assert '"mode": "mock"' in sample
+    assert "MOCK-" in sample
+    assert manifest["provenance"]["mode"] == "mock"
+
+
+def test_k16_mutex_blocks_concurrent_spawn(engine: ap.AssetPipeline) -> None:
+    """Concurrent Engine-Spawn wird geblockt."""
+    with engine.mutex():
+        with pytest.raises(ap.MutexActiveError) as exc_info:
+            engine.run()
+    assert "K16-VETO" in str(exc_info.value)
