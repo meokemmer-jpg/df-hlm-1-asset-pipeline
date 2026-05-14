@@ -1,0 +1,176 @@
+df_id: DF-HLM-1
+df_name: df-hlm-1-asset-pipeline
+version: 1.0.0
+status: READY
+crux_mk: true
+
+description: |
+  Hotel-Lifecycle-Marketing asset pipeline for 7 Berlin hotels and 8 reusable personas.
+  Generates 4 HTML-first channel assets per hotel/persona combination with provenance,
+  linting, domain validation, mock-mode-by-default safety, and zip bundle output.
+
+env_var_gating:
+  mock_mode_default: true
+  real_output_env_var: DF_HLM_1_ENABLE_REAL_OUTPUT
+  real_output_env_value: "1"
+  direct_mode_env_var: DF_HLM_1_DIRECT_MODE
+
+k11_cascade_containment:
+  cascade_isolation: hard
+  failure_blast_radius: 1
+  dependency_dlq_strategy: "per-combo isolation with manifest errors and audit logging"
+
+k12_distillation_resistenz:
+  output_feeds_into_training: false
+  provenance_required_in_output: true
+  non_llm_validation_layer: "html lint + deterministic provenance + manifest digest"
+
+k13_independent_ground_truth:
+  external_anchor_type: hotel_domain_allowlist
+  external_anchor_validation_frequency: per_asset
+  allowed_domains:
+    - alexanderplaza.com
+    - monbijouhotel.com
+    - orania.berlin
+    - amanogroup.com
+    - 25hours-hotels.com
+    - ritzcarlton.com
+    - hotelzoo.de
+
+k14_human_override_decay:
+  override_complexity: single_command
+  override_env_var: DF_HLM_1_FORCE_OVERRIDE
+  override_documentation_freshness_days: 30
+  martin_review_cadence: weekly
+  bus_factor_handover_drilled: false
+
+k15_entropy_budget:
+  entropy_added_loc_estimate: 390
+  entropy_added_concepts:
+    - AssetPipeline
+    - BundleKey
+    - HtmlLint
+    - DomainAllowlist
+    - MutexGuard
+    - ZipManifest
+  entropy_justified_by_rho: "+EUR 40-90k/J via repeatable multi-channel asset generation"
+  entropy_subtractive_potential: true
+
+k16_concurrent_spawn_mutex:
+  concurrent_spawn_protection: both
+  lock_dir: /Users/make/Projects/dark-factories/df-hlm-1-asset-pipeline/.df-hlm-1.lock
+  lock_stale_age_h: 6
+  engine_pgrep_check: true
+  pgrep_pattern: df-hlm-1-asset-pipeline/src/asset_pipeline.py
+  lock_release_on: EXIT_INT_TERM
+
+lose_coupling:
+  LC1_graceful_degradation:
+    degradation_modes: [full, mock, direct, standalone]
+    degradation_test_required: true
+  LC2_direct_mode:
+    direct_mode_available: true
+    direct_mode_capability: 0.45
+    direct_mode_trigger: "DF_HLM_1_DIRECT_MODE=1"
+  LC3_circuit_breaker:
+    circuit_breaker_timeout_s: 30
+    circuit_breaker_open_threshold: 3
+    circuit_breaker_half_open_test_interval_s: 300
+  LC4_failure_isolation:
+    state_externalization: true
+    idempotent_operations: true
+    dependency_dlq_separate: true
+  LC5_health_check:
+    health_check_dependencies: []
+    health_check_degraded_score: 0.7
+    health_check_endpoint_or_file: /Users/make/Projects/dark-factories/df-hlm-1-asset-pipeline/output/health/df-hlm-1-health.json
+
+brand:
+  colors:
+    charcoal: "#111827"
+    gold: "#C8A45D"
+    ivory: "#F9FAFB"
+    teal: "#0F766E"
+    rose: "#BE123C"
+
+tailwind:
+  cdn_anchor: https://cdn.tailwindcss.com
+
+operations:
+  output_path: /Users/make/Projects/dark-factories/df-hlm-1-asset-pipeline/output
+  bundle_subdir: bundles
+  audit_log_path: /Users/make/Projects/dark-factories/df-hlm-1-asset-pipeline/output/audit/asset-pipeline.jsonl
+  stop_flag_path: /Users/make/Projects/dark-factories/df-hlm-1-asset-pipeline/STOP-DF-HLM-1.flag
+  health_file_path: /Users/make/Projects/dark-factories/df-hlm-1-asset-pipeline/output/health/df-hlm-1-health.json
+
+hotels:
+  - hotel_id: alexander-plaza
+    name: Park Plaza Alexander Plaza
+    city: Berlin
+    canonical_url: https://alexanderplaza.com
+  - hotel_id: monbijou
+    name: Monbijou Hotel
+    city: Berlin
+    canonical_url: https://monbijouhotel.com
+  - hotel_id: orania
+    name: Orania.Berlin
+    city: Berlin
+    canonical_url: https://orania.berlin
+  - hotel_id: amano-grand-central
+    name: AMANO Grand Central
+    city: Berlin
+    canonical_url: https://amanogroup.com/hotels/amano-grand-central
+  - hotel_id: 25hours-bikini
+    name: 25hours Hotel Bikini Berlin
+    city: Berlin
+    canonical_url: https://25hours-hotels.com/hotels/berlin/bikini-berlin
+  - hotel_id: ritz-carlton-berlin
+    name: The Ritz-Carlton Berlin
+    city: Berlin
+    canonical_url: https://ritzcarlton.com/en/hotels/europe/berlin
+  - hotel_id: hotel-zoo
+    name: Hotel Zoo Berlin
+    city: Berlin
+    canonical_url: https://hotelzoo.de
+
+personas:
+  - persona_id: city-breaker
+    name: City Breaker
+    segment: leisure
+    tone: playful
+    desire: short cultural stay with photo-worthy moments
+  - persona_id: bleisure-exec
+    name: Bleisure Executive
+    segment: business
+    tone: confident
+    desire: efficient business trip with premium downtime
+  - persona_id: design-lover
+    name: Design Lover
+    segment: leisure
+    tone: editorial
+    desire: architecture, interiors, and creative neighborhoods
+  - persona_id: family-planner
+    name: Family Planner
+    segment: family
+    tone: reassuring
+    desire: smooth logistics and memorable shared moments
+  - persona_id: event-host
+    name: Event Host
+    segment: events
+    tone: polished
+    desire: venues, coordination, and guest confidence
+  - persona_id: wellness-seeker
+    name: Wellness Seeker
+    segment: wellness
+    tone: calm
+    desire: recovery, spa rhythm, and quiet luxury
+  - persona_id: foodie-explorer
+    name: Foodie Explorer
+    segment: lifestyle
+    tone: sensory
+    desire: chef-led experiences and neighborhood discovery
+  - persona_id: luxury-upgrader
+    name: Luxury Upgrader
+    segment: premium
+    tone: elevated
+    desire: premium room upsell with concierge touches
