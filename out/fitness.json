@@ -1,0 +1,8 @@
+{
+  "df": "df-hlm-1-asset-pipeline",
+  "ts": "2026-06-05T14:09:25.040988+00:00",
+  "ok": true,
+  "bytes": 2357,
+  "model": "qwen2.5:14b-instruct",
+  "duration_s": 49.2
+}
