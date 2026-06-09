@@ -1,0 +1,12 @@
+{
+  "df": "df-hlm-1-asset-pipeline",
+  "ts": "2026-06-08T19:54:49.879918+00:00",
+  "has_src": true,
+  "parse_ok": true,
+  "has_tests": true,
+  "test_ran": true,
+  "tests_passed": true,
+  "code_hash": "b4843094421335a5",
+  "python": "3.14.4",
+  "crux": "[CRUX-MK]"
+}
