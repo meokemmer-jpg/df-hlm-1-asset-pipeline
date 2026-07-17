@@ -1,9 +1,9 @@
 {
   "df": "df-hlm-1-asset-pipeline",
-  "ts": "2026-07-15T03:00:57.223605+00:00",
+  "ts": "2026-07-16T15:55:22.049401+00:00",
   "maturity": "TESTED",
   "maturity_level": 4,
   "evidence_grade": 4,
-  "wargame_verdict": null,
+  "wargame_verdict": "CONDITIONAL",
   "crux": "[CRUX-MK]"
 }
